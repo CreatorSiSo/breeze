@@ -1937,27 +1937,33 @@ namespace Breeze
 
         }
 
+        const auto factor = widget ? widget->devicePixelRatio() : 1;
+
         // vertical positioning
         switch( tabOption->shape )
         {
             case QTabBar::RoundedNorth:
             case QTabBar::TriangularNorth:
-            tabBarRect.moveTop( rect.top()+1 );
+            tabBarRect.moveTop( rect.top() + factor );
+            tabBarRect.setHeight( tabBarRect.height() + factor );
             break;
 
             case QTabBar::RoundedSouth:
             case QTabBar::TriangularSouth:
-            tabBarRect.moveBottom( rect.bottom()-1 );
+            tabBarRect.moveBottom( rect.bottom() );
+            tabBarRect.setTop( tabBarRect.top() - factor );
             break;
 
             case QTabBar::RoundedWest:
             case QTabBar::TriangularWest:
-            tabBarRect.moveLeft( rect.left()+1 );
+            tabBarRect.moveLeft( rect.left() + factor );
+            tabBarRect.setWidth( tabBarRect.width() + factor );
             break;
 
             case QTabBar::RoundedEast:
             case QTabBar::TriangularEast:
-            tabBarRect.moveRight( rect.right()-1 );
+            tabBarRect.moveRight( rect.right() );
+            tabBarRect.setLeft( tabBarRect.left() - factor );
             break;
 
             default: break;
