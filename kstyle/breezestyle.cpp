@@ -53,6 +53,8 @@
 #if BREEZE_HAVE_QTQUICK
 #include <QQuickWindow>
 #include <KCoreAddons>
+#include <QGraphicsItem>
+#include <QGraphicsProxyWidget>
 #endif
 
 namespace BreezePrivate
@@ -568,6 +570,9 @@ namespace Breeze
             case PM_ToolBarFrameWidth: return Metrics::ToolBar_FrameWidth;
             case PM_ToolTipLabelFrameWidth: return Metrics::ToolTip_FrameWidth;
 
+            case PM_FocusFrameVMargin:
+            case PM_FocusFrameHMargin: return 2;
+
             // layout
             case PM_LayoutLeftMargin:
             case PM_LayoutTopMargin:
@@ -743,6 +748,9 @@ namespace Breeze
             case SH_MessageBox_TextInteractionFlags: return Qt::TextSelectableByMouse | Qt::LinksAccessibleByMouse;
             case SH_ProgressDialog_CenterCancelButton: return false;
             case SH_MessageBox_CenterButtons: return false;
+
+            case SH_FocusFrame_AboveWidget: return true;
+            case SH_FocusFrame_Mask: return false;
 
             case SH_RequestSoftwareInputPanel: return RSIP_OnMouseClick;
             case SH_TitleBar_NoBorder: return true;
@@ -1017,6 +1025,7 @@ namespace Breeze
             case CE_ScrollBarAddPage: fcn = &Style::emptyControl; break;
             case CE_ScrollBarSubPage: fcn = &Style::emptyControl; break;
             case CE_ShapedFrame: fcn = &Style::drawShapedFrameControl; break;
+            case CE_FocusFrame: fcn = &Style::drawFocusFrame; break;
             case CE_RubberBand: fcn = &Style::drawRubberBandControl; break;
             case CE_SizeGrip: fcn = &Style::emptyControl; break;
             case CE_HeaderSection: fcn = &Style::drawHeaderSectionControl; break;
@@ -1113,6 +1122,55 @@ namespace Breeze
         // fallback
         return ParentStyleClass::drawItemText( painter, rect, flags, palette, enabled, text, textRole );
 
+    }
+
+    bool Style::event(QEvent *e)
+    {
+        // Adapted from QMacStyle::event()
+        // SPDX-FileCopyrightText: 2011 The Qt Company Ltd.
+        // SPDX-FileCopyrightText: 2021 Noah Davis <noahadvs@gmail.com>
+        // SPDX-License-Identifier: LGPL-3.0-only OR GPL-2.0-or-later
+        if (e->type() == QEvent::FocusIn) {
+            QWidget *target = nullptr;
+            auto focusWidget = QApplication::focusWidget();
+            if (auto graphicsView = qobject_cast<QGraphicsView *>(focusWidget)) {
+                QGraphicsItem *focusItem = graphicsView->scene() ? graphicsView->scene()->focusItem() : nullptr;
+                if (focusItem && focusItem->type() == QGraphicsProxyWidget::Type) {
+                    auto proxy = static_cast<QGraphicsProxyWidget *>(focusItem);
+                    if (proxy->widget()) {
+                        focusWidget = proxy->widget()->focusWidget();
+                    }
+                }
+            }
+
+            if (focusWidget) {
+                auto focusEvent = dynamic_cast<QFocusEvent*>(e);
+                auto focusReason = focusEvent->reason();
+                bool hasKeyboardFocusReason = focusReason == Qt::TabFocusReason
+                    || focusReason == Qt::BacktabFocusReason
+                    || focusReason == Qt::ShortcutFocusReason;
+                if (hasKeyboardFocusReason) {
+                    auto focusProxy = focusWidget->focusProxy();
+                    while (focusProxy != nullptr) {
+                        focusWidget = focusProxy;
+                        focusProxy = focusWidget->focusProxy();
+                    }
+                    target = focusWidget;
+                }
+            }
+            if (_focusFrame) {
+                // sets to nullptr or a widget
+                _focusFrame->setWidget(target);
+            } else if (target) { // only create if there is a widget
+                _focusFrame = new QFocusFrame(target);
+                _focusFrame->setWidget(target);
+            }
+        } else if (e->type() == QEvent::FocusOut) {
+            if(_focusFrame) {
+                _focusFrame->setWidget(nullptr);
+            }
+        }
+        return ParentStyleClass::event(e);
     }
 
     //_____________________________________________________________________
@@ -5426,6 +5484,197 @@ namespace Breeze
 
         return false;
 
+    }
+
+    //___________________________________________________________________________________
+    bool Style::drawFocusFrame( const QStyleOption* option, QPainter* painter, const QWidget* widget ) const
+    {
+        // Adapted from QMacStylePrivate::drawFocusRing()
+        // SPDX-FileCopyrightText: 2016 The Qt Company Ltd.
+        // SPDX-FileCopyrightText: 2021 Noah Davis <noahadvs@gmail.com>
+        // SPDX-License-Identifier: LGPL-3.0-only OR GPL-2.0-or-later
+        const QFocusFrame *focusFrame = qobject_cast<const QFocusFrame *>(widget);
+        const QWidget *targetWidget = focusFrame ? focusFrame->widget() : nullptr;
+        if (focusFrame && !targetWidget) return true;
+
+        const int hmargin = proxy()->pixelMetric(QStyle::PM_FocusFrameHMargin, option, widget);
+        const int vmargin = proxy()->pixelMetric(QStyle::PM_FocusFrameVMargin, option, widget);
+        const QRect targetWidgetRect = option->rect.adjusted(hmargin, vmargin, -hmargin, -vmargin);
+
+        QRect innerRect = targetWidgetRect;
+        auto outerRect = [&innerRect, &hmargin, &vmargin]() {
+            return innerRect.adjusted(-hmargin, -vmargin, hmargin, vmargin);
+        };
+
+        qreal innerRadius = Metrics::Frame_FrameRadius;
+        auto outerRadius = [&innerRadius, &vmargin]() {
+            return innerRadius + vmargin;
+        };
+
+        QPainterPath focusFramePath;
+        focusFramePath.setFillRule(Qt::OddEvenFill);
+
+        if (!widget) {
+            focusFramePath.addRoundedRect(innerRect, innerRadius, innerRadius);
+            qreal r = outerRadius();
+            focusFramePath.addRoundedRect(option->rect, r, r);
+        } else if (targetWidget->inherits("QLineEdit") || targetWidget->inherits("QTextEdit")
+            || targetWidget->inherits("QAbstractSpinBox") || targetWidget->inherits("QComboBox")
+            || targetWidget->inherits("QPushButton") || targetWidget->inherits("QToolButton")
+        ) {
+            /* It's OK to check for QAbstractSpinBox instead of more spacific classes
+             * because QAbstractSpinBox handles the painting for spinboxes,
+             * unlike most abstract widget classes.
+             */
+            innerRect.adjust(1, 1, -1, -1);
+            focusFramePath.addRoundedRect(innerRect, innerRadius, innerRadius);
+            qreal r = outerRadius();
+            focusFramePath.addRoundedRect(outerRect(), r, r);
+        } else if (auto checkBox = qobject_cast<const QCheckBox*>(targetWidget)) {
+            QStyleOptionButton opt;
+            opt.initFrom(checkBox);
+            if (checkBox->isDown()) {
+                opt.state |= QStyle::State_Sunken;
+            }
+            if (checkBox->isTristate()) {
+                opt.state |= QStyle::State_NoChange;
+            } else if (checkBox->isChecked()) {
+                opt.state |= QStyle::State_On;
+            } else {
+                opt.state |= QStyle::State_Off;
+            }
+            opt.text = checkBox->text();
+            opt.icon = checkBox->icon();
+            opt.iconSize = checkBox->iconSize();
+            innerRect = subElementRect(SE_CheckBoxIndicator, &opt, checkBox);
+            innerRect.adjust(2, 2, -2, -2);
+            innerRect.translate(hmargin, vmargin);
+            innerRect = visualRect(option, innerRect);
+            focusFramePath.addRoundedRect(innerRect, innerRadius, innerRadius);
+            qreal r = outerRadius();
+            focusFramePath.addRoundedRect(outerRect(), r, r);
+        } else if (auto radioButton = qobject_cast<const QRadioButton*>(targetWidget)) {
+            QStyleOptionButton opt;
+            opt.initFrom(radioButton);
+            if (radioButton->isDown()) {
+                opt.state |= QStyle::State_Sunken;
+            }
+            if (radioButton->isChecked()) {
+                opt.state |= QStyle::State_On;
+            } else {
+                opt.state |= QStyle::State_Off;
+            }
+            opt.text = radioButton->text();
+            opt.icon = radioButton->icon();
+            opt.iconSize = radioButton->iconSize();
+            innerRect = subElementRect(SE_RadioButtonIndicator, &opt, radioButton);
+            innerRect.adjust(2, 2, -2, -2);
+            innerRect.translate(hmargin, vmargin);
+            innerRect = visualRect(option, innerRect);
+            innerRadius = innerRect.height() / 2.0;
+            QRect oRect = outerRect();
+            qreal oRadius = oRect.height() / 2.0;
+            focusFramePath.addRoundedRect(innerRect, innerRadius, innerRadius);
+            focusFramePath.addRoundedRect(oRect, oRadius, oRadius);
+        } else if (auto slider = qobject_cast<const QSlider*>(targetWidget)) {
+            QStyleOptionSlider opt;
+            opt.initFrom(slider);
+            opt.orientation = slider->orientation();
+            opt.maximum = slider->maximum();
+            opt.minimum = slider->minimum();
+            opt.tickPosition = slider->tickPosition();
+            opt.tickInterval = slider->tickInterval();
+            if (opt.orientation == Qt::Horizontal) {
+                opt.upsideDown = slider->invertedAppearance() && opt.direction != Qt::RightToLeft;
+            } else {
+                opt.upsideDown = !slider->invertedAppearance();
+            }
+            opt.sliderPosition = slider->sliderPosition();
+            opt.sliderValue = slider->value();
+            opt.singleStep = slider->singleStep();
+            opt.pageStep = slider->pageStep();
+            if (opt.orientation == Qt::Horizontal) {
+                opt.state |= QStyle::State_Horizontal;
+            }
+            innerRect = subControlRect(CC_Slider, &opt, SC_SliderHandle, slider);
+            innerRect.adjust(1, 1, -1, -1);
+            innerRect.translate(hmargin, vmargin);
+            innerRadius = innerRect.height() / 2.0;
+            QRect oRect = outerRect();
+            qreal oRadius = oRect.height() / 2.0;
+            focusFramePath.addRoundedRect(innerRect, innerRadius, innerRadius);
+            focusFramePath.addRoundedRect(oRect, oRadius, oRadius);
+            if (_focusFrame) {
+                // Workaround QFocusFrame not fully repainting outside the bounds of the targetWidget
+                _focusFrame->update();
+            }
+        } else if (auto dial = qobject_cast<const QDial*>(targetWidget)) {
+            QStyleOptionSlider opt;
+            opt.initFrom(dial);
+            opt.maximum = dial->maximum();
+            opt.minimum = dial->minimum();
+            opt.sliderPosition = dial->sliderPosition();
+            opt.sliderValue = dial->value();
+            opt.singleStep = dial->singleStep();
+            opt.pageStep = dial->pageStep();
+            opt.upsideDown = !dial->invertedAppearance();
+            opt.notchTarget = dial->notchTarget();
+            opt.dialWrapping = dial->wrapping();
+            if (!dial->notchesVisible()) {
+                opt.subControls &= ~QStyle::SC_DialTickmarks;
+                opt.tickPosition = QSlider::TicksAbove;
+            } else {
+                opt.tickPosition = QSlider::NoTicks;
+            }
+            opt.tickInterval = dial->notchSize();
+            innerRect = subControlRect(CC_Dial, &opt, SC_DialHandle, dial);
+            innerRect.adjust(1, 1, -1, -1);
+            innerRect.translate(hmargin, vmargin);
+            innerRadius = innerRect.height() / 2.0;
+            QRect oRect = outerRect();
+            qreal oRadius = oRect.height() / 2.0;
+            focusFramePath.addRoundedRect(innerRect, innerRadius, innerRadius);
+            focusFramePath.addRoundedRect(oRect, oRadius, oRadius);
+            if (_focusFrame) {
+                // Workaround QFocusFrame not fully repainting outside the bounds of the targetWidget
+                _focusFrame->update();
+            }
+        } else if (auto groupBox = qobject_cast<const QGroupBox*>(targetWidget)) {
+            QStyleOptionGroupBox opt;
+            opt.initFrom(groupBox);
+            opt.lineWidth = 1;
+            opt.midLineWidth = 0;
+            opt.textAlignment = groupBox->alignment();
+            opt.subControls = QStyle::SC_GroupBoxFrame;
+            if (groupBox->isCheckable()) {
+                opt.subControls |= QStyle::SC_GroupBoxCheckBox;
+                if (groupBox->isChecked()) {
+                    opt.state |= QStyle::State_On;
+                } else {
+                    opt.state |= QStyle::State_Off;
+                }
+                // NOTE: we can't get the sunken state of the checkbox
+            }
+            opt.text = groupBox->title();
+            if (!opt.text.isEmpty()) {
+                opt.subControls |= QStyle::SC_GroupBoxLabel;
+            }
+            innerRect = subControlRect(CC_GroupBox, &opt, SC_GroupBoxCheckBox, groupBox);
+            innerRect.adjust(2, 2, -2, -2);
+            innerRect.translate(hmargin, vmargin);
+            innerRect = visualRect(option, innerRect);
+            focusFramePath.addRoundedRect(innerRect, innerRadius, innerRadius);
+            qreal r = outerRadius();
+            focusFramePath.addRoundedRect(outerRect(), r, r);
+        } else {
+            return true;
+        }
+
+        auto outerColor = _helper->alphaColor(option->palette.highlight().color(), 0.33);
+
+        painter->setRenderHint(QPainter::Antialiasing);
+        painter->fillPath(focusFramePath, outerColor);
+        return true;
     }
 
     //___________________________________________________________________________________
